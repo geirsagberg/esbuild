@@ -2,6 +2,14 @@
 
 ## 0.15.9
 
+**This release contains backwards-incompatible changes.** Since esbuild is before version 1.0.0, these changes have been released as a new minor version to reflect this (as [recommended by npm](https://docs.npmjs.com/cli/v6/using-npm/semver/)). You should either be pinning the exact version of `esbuild` in your `package.json` file or be using a version range syntax that only accepts patch upgrades such as `~0.15.0`. See the documentation about [semver](https://docs.npmjs.com/cli/v6/using-npm/semver/) for more information.
+
+* Rename the `master` branch to `main`
+
+    The primary branch for this repository was previously called `master` but is now called `main`. This change mirrors a similar change in many other projects.
+
+## Unreleased
+
 * Fix an obscure npm package installation issue with `--omit=optional` ([#2558](https://github.com/evanw/esbuild/issues/2558))
 
     The previous release introduced a regression with `npm install esbuild --omit=optional` where the file `node_modules/.bin/esbuild` would no longer be present after installation. That could cause any package scripts which used the `esbuild` command to no longer work. This release fixes the regression so `node_modules/.bin/esbuild` should now be present again after installation. This regression only affected people installing esbuild using `npm` with either the `--omit=optional` or `--no-optional` flag, which is a somewhat unusual situation.
