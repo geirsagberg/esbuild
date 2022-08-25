@@ -576,7 +576,8 @@ type OnLoadResult struct {
 type ResolveKind uint8
 
 const (
-	ResolveEntryPoint ResolveKind = iota
+	ResolveNone ResolveKind = iota
+	ResolveEntryPoint
 	ResolveJSImportStatement
 	ResolveJSRequireCall
 	ResolveJSDynamicImport
