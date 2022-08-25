@@ -547,10 +547,10 @@ func parseOptionsImpl(
 						"to specify the file type that the output extension applies to .",
 				)
 			}
-			if buildOpts.OutExtensions == nil {
-				buildOpts.OutExtensions = make(map[string]string)
+			if buildOpts.OutExtension == nil {
+				buildOpts.OutExtension = make(map[string]string)
 			}
-			buildOpts.OutExtensions[value[:equals]] = value[equals+1:]
+			buildOpts.OutExtension[value[:equals]] = value[equals+1:]
 
 		case strings.HasPrefix(arg, "--platform="):
 			value := arg[len("--platform="):]
@@ -619,7 +619,7 @@ func parseOptionsImpl(
 				)
 			}
 			if buildOpts != nil {
-				buildOpts.JSXMode = mode
+				buildOpts.JSX = mode
 			} else {
 				transformOpts.JSXMode = mode
 			}

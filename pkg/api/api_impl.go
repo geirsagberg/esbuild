@@ -880,7 +880,7 @@ func rebuildImpl(
 	}
 	targetFromAPI, jsFeatures, cssFeatures, targetEnv := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
 	jsOverrides, jsMask, cssOverrides, cssMask := validateSupported(log, buildOpts.Supported)
-	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
+	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtension)
 	bannerJS, bannerCSS := validateBannerOrFooter(log, "banner", buildOpts.Banner)
 	footerJS, footerCSS := validateBannerOrFooter(log, "footer", buildOpts.Footer)
 	minify := buildOpts.MinifyWhitespace && buildOpts.MinifyIdentifiers && buildOpts.MinifySyntax
@@ -897,8 +897,8 @@ func rebuildImpl(
 		UnsupportedCSSFeatureOverridesMask: cssMask,
 		OriginalTargetEnv:                  targetEnv,
 		JSX: config.JSXOptions{
-			Preserve:         buildOpts.JSXMode == JSXModePreserve,
-			AutomaticRuntime: buildOpts.JSXMode == JSXModeAutomatic,
+			Preserve:         buildOpts.JSX == JSXModePreserve,
+			AutomaticRuntime: buildOpts.JSX == JSXModeAutomatic,
 			Factory:          validateJSXExpr(log, buildOpts.JSXFactory, "factory"),
 			Fragment:         validateJSXExpr(log, buildOpts.JSXFragment, "fragment"),
 			Development:      buildOpts.JSXDev,
