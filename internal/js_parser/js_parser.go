@@ -114,7 +114,7 @@ type parser struct {
 	exportStarImportRecords     []uint32
 
 	// These are for handling ES6 imports and exports
-	importItemsForNamespace map[js_ast.Ref]map[string]js_ast.LocRef
+	importItemsForNamespace map[js_ast.Ref]namespaceImportItems
 	isImportItem            map[js_ast.Ref]bool
 	namedImports            map[js_ast.Ref]js_ast.NamedImport
 	namedExports            map[string]js_ast.NamedExport
@@ -342,6 +342,11 @@ type parser struct {
 	latestReturnHadSemicolon    bool
 	messageAboutThisIsUndefined bool
 	isControlFlowDead           bool
+}
+
+type namespaceImportItems struct {
+	entries           map[string]js_ast.LocRef
+	importRecordIndex uint32
 }
 
 type stringLocalForYarnPnP struct {
@@ -1797,6 +1802,14 @@ func (p *parser) checkForLegacyOctalLiteral(e js_ast.E) {
 		}
 		p.legacyOctalLiterals[e] = p.lexer.Range()
 	}
+}
+
+func (p *parser) notesForAssertTypeJSON(record *ast.ImportRecord, alias string) []logger.MsgData {
+	return []logger.MsgData{p.tracker.MsgData(
+		js_lexer.RangeOfImportAssertion(p.source, *ast.FindAssertion(*record.Assertions, "type")),
+		"This is considered an import of a standard JSON module because of the import assertion here:"),
+		{Text: fmt.Sprintf("You can either keep the import assertion and only use the \"default\" import, "+
+			"or you can remove the import assertion and use the %q import (which is non-standard behavior).", alias)}}
 }
 
 // This assumes the caller has already checked for TStringLiteral or TNoSubstitutionTemplateLiteral
@@ -5809,7 +5822,8 @@ func (p *parser) parseLabelName() *js_ast.LocRef {
 	return &name
 }
 
-func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
+func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry, ast.ImportRecordFlags) {
+	var flags ast.ImportRecordFlags
 	pathLoc := p.lexer.Loc()
 	pathText := helpers.UTF16ToString(p.lexer.StringLiteral())
 	if p.lexer.Token == js_lexer.TNoSubstitutionTemplateLiteral {
@@ -5864,6 +5878,11 @@ func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
 				PreferQuotedKey: preferQuotedKey,
 			})
 
+			// Using "assert: { type: 'json' }" triggers special behavior
+			if helpers.UTF16EqualsString(key, "type") && helpers.UTF16EqualsString(value, "json") {
+				flags |= ast.AssertTypeJSON
+			}
+
 			if p.lexer.Token != js_lexer.TComma {
 				break
 			}
@@ -5874,7 +5893,7 @@ func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
 		assertions = &entries
 	}
 
-	return pathLoc, pathText, assertions
+	return pathLoc, pathText, assertions, flags
 }
 
 // This assumes the "function" token has already been parsed
@@ -6263,6 +6282,7 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			var pathLoc logger.Loc
 			var pathText string
 			var assertions *[]ast.AssertEntry
+			var flags ast.ImportRecordFlags
 
 			if p.lexer.IsContextualKeyword("as") {
 				// "export * as ns from 'path'"
@@ -6272,15 +6292,15 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 				alias = &js_ast.ExportStarAlias{Loc: p.lexer.Loc(), OriginalName: name.String}
 				p.lexer.Next()
 				p.lexer.ExpectContextualKeyword("from")
-				pathLoc, pathText, assertions = p.parsePath()
+				pathLoc, pathText, assertions, flags = p.parsePath()
 			} else {
 				// "export * from 'path'"
 				p.lexer.ExpectContextualKeyword("from")
-				pathLoc, pathText, assertions = p.parsePath()
+				pathLoc, pathText, assertions, flags = p.parsePath()
 				name := js_ast.GenerateNonUniqueNameFromPath(pathText) + "_star"
 				namespaceRef = p.storeNameInRef(js_lexer.MaybeSubstring{String: name})
 			}
-			importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
+			importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 
 			// Export-star statements anywhere in the file disable top-level const
 			// local prefix because import cycles can be used to trigger TDZ
@@ -6302,8 +6322,8 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			if p.lexer.IsContextualKeyword("from") {
 				// "export {} from 'path'"
 				p.lexer.Next()
-				pathLoc, pathText, assertions := p.parsePath()
-				importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
+				pathLoc, pathText, assertions, flags := p.parsePath()
+				importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 				name := "import_" + js_ast.GenerateNonUniqueNameFromPath(pathText)
 				namespaceRef := p.storeNameInRef(js_lexer.MaybeSubstring{String: name})
 
@@ -6902,7 +6922,7 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			return js_ast.Stmt{}
 		}
 
-		pathLoc, pathText, assertions := p.parsePath()
+		pathLoc, pathText, assertions, flags := p.parsePath()
 		p.lexer.ExpectOrInsertSemicolon()
 
 		// If TypeScript's "preserveValueImports": true setting is active, TypeScript's
@@ -6931,10 +6951,10 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			stmt.Items = nil
 		}
 
-		stmt.ImportRecordIndex = p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
 		if wasOriginallyBareImport {
-			p.importRecords[stmt.ImportRecordIndex].Flags |= ast.WasOriginallyBareImport
+			flags |= ast.WasOriginallyBareImport
 		}
+		stmt.ImportRecordIndex = p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 
 		if stmt.StarNameLoc != nil {
 			name := p.loadNameFromRef(stmt.NamespaceRef)
@@ -6968,7 +6988,10 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 		}
 
 		// Track the items for this namespace
-		p.importItemsForNamespace[stmt.NamespaceRef] = itemRefs
+		p.importItemsForNamespace[stmt.NamespaceRef] = namespaceImportItems{
+			entries:           itemRefs,
+			importRecordIndex: stmt.ImportRecordIndex,
+		}
 
 		// Import statements anywhere in the file disable top-level const
 		// local prefix because import cycles can be used to trigger TDZ
@@ -7203,13 +7226,14 @@ func extractDeclsForBinding(binding js_ast.Binding, decls []js_ast.Decl) []js_as
 	return decls
 }
 
-func (p *parser) addImportRecord(kind ast.ImportKind, loc logger.Loc, text string, assertions *[]ast.AssertEntry) uint32 {
+func (p *parser) addImportRecord(kind ast.ImportKind, loc logger.Loc, text string, assertions *[]ast.AssertEntry, flags ast.ImportRecordFlags) uint32 {
 	index := uint32(len(p.importRecords))
 	p.importRecords = append(p.importRecords, ast.ImportRecord{
 		Kind:       kind,
 		Range:      p.source.RangeOfString(loc),
 		Path:       logger.Path{Text: text},
 		Assertions: assertions,
+		Flags:      flags,
 	})
 	return index
 }
@@ -11247,14 +11271,27 @@ func (p *parser) maybeRewritePropertyAccess(
 		if p.options.mode == config.ModeBundle {
 			if importItems, ok := p.importItemsForNamespace[id.Ref]; ok {
 				// Cache translation so each property access resolves to the same import
-				item, ok := importItems[name]
+				item, ok := importItems.entries[name]
 				if !ok {
+					// Replace non-default imports with "undefined" for standard JSON modules
+					if record := &p.importRecords[importItems.importRecordIndex]; (record.Flags&ast.AssertTypeJSON) != 0 && name != "default" {
+						kind := logger.Warning
+						if p.suppressWarningsAboutWeirdCode {
+							kind = logger.Debug
+						}
+						p.log.AddIDWithNotes(logger.MsgID_JS_AssertTypeJSON, kind, &p.tracker, js_lexer.RangeOfIdentifier(p.source, nameLoc),
+							fmt.Sprintf("Non-default import %q is undefined with a standard JSON module", name),
+							p.notesForAssertTypeJSON(record, name))
+						p.ignoreUsage(id.Ref)
+						return js_ast.Expr{Loc: loc, Data: js_ast.EUndefinedShared}, true
+					}
+
 					// Generate a new import item symbol in the module scope
 					item = js_ast.LocRef{Loc: nameLoc, Ref: p.newSymbol(js_ast.SymbolImport, name)}
 					p.moduleScope.Generated = append(p.moduleScope.Generated, item.Ref)
 
 					// Link the namespace import and the import item together
-					importItems[name] = item
+					importItems.entries[name] = item
 					p.isImportItem[item.Ref] = true
 
 					symbol := &p.symbols[item.Ref.InnerIndex]
@@ -13877,6 +13914,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		e.Expr = p.visitExpr(e.Expr)
 
 		var assertions *[]ast.AssertEntry
+		var flags ast.ImportRecordFlags
 		if e.OptionsOrNil.Data != nil {
 			e.OptionsOrNil = p.visitExpr(e.OptionsOrNil)
 
@@ -13907,6 +13945,9 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 													ValueLoc:        p.ValueOrNil.Loc,
 													PreferQuotedKey: p.Flags.Has(js_ast.PropertyPreferQuotedKey),
 												})
+												if helpers.UTF16EqualsString(key.Value, "type") && helpers.UTF16EqualsString(value.Value, "json") {
+													flags |= ast.AssertTypeJSON
+												}
 												continue
 											} else {
 												why = fmt.Sprintf("the value for the property %q was not a string literal",
@@ -13987,7 +14028,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					return js_ast.Expr{Loc: arg.Loc, Data: js_ast.ENullShared}
 				}
 
-				importRecordIndex := p.addImportRecord(ast.ImportDynamic, arg.Loc, helpers.UTF16ToString(str.Value), assertions)
+				importRecordIndex := p.addImportRecord(ast.ImportDynamic, arg.Loc, helpers.UTF16ToString(str.Value), assertions, flags)
 				if isAwaitTarget && p.fnOrArrowDataVisit.tryBodyCount != 0 {
 					record := &p.importRecords[importRecordIndex]
 					record.Flags |= ast.HandlesImportErrors
@@ -14248,7 +14289,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 								return js_ast.Expr{Loc: arg.Loc, Data: js_ast.ENullShared}
 							}
 
-							importRecordIndex := p.addImportRecord(ast.ImportRequireResolve, e.Args[0].Loc, helpers.UTF16ToString(str.Value), nil)
+							importRecordIndex := p.addImportRecord(ast.ImportRequireResolve, e.Args[0].Loc, helpers.UTF16ToString(str.Value), nil, 0)
 							if p.fnOrArrowDataVisit.tryBodyCount != 0 {
 								record := &p.importRecords[importRecordIndex]
 								record.Flags |= ast.HandlesImportErrors
@@ -14360,7 +14401,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 									return js_ast.Expr{Loc: expr.Loc, Data: js_ast.ENullShared}
 								}
 
-								importRecordIndex := p.addImportRecord(ast.ImportRequire, arg.Loc, helpers.UTF16ToString(str.Value), nil)
+								importRecordIndex := p.addImportRecord(ast.ImportRequire, arg.Loc, helpers.UTF16ToString(str.Value), nil, 0)
 								if p.fnOrArrowDataVisit.tryBodyCount != 0 {
 									record := &p.importRecords[importRecordIndex]
 									record.Flags |= ast.HandlesImportErrors
@@ -14545,7 +14586,7 @@ func (p *parser) convertSymbolUseToCall(ref js_ast.Ref, isSingleNonSpreadArgCall
 
 func (p *parser) warnAboutImportNamespaceCall(target js_ast.Expr, kind importNamespaceCallKind) {
 	if p.options.outputFormat != config.FormatPreserve {
-		if id, ok := target.Data.(*js_ast.EIdentifier); ok && p.importItemsForNamespace[id.Ref] != nil {
+		if id, ok := target.Data.(*js_ast.EIdentifier); ok && p.importItemsForNamespace[id.Ref].entries != nil {
 			key := importNamespaceCall{
 				ref:  id.Ref,
 				kind: kind,
@@ -15052,6 +15093,21 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 			keepUnusedImports := p.options.ts.Parse && (p.options.unusedImportFlagsTS&config.UnusedImportKeepValues) != 0 &&
 				p.options.mode != config.ModeBundle && !p.options.minifyIdentifiers
 
+			// Forbid non-default imports for standard JSON modules
+			if (record.Flags&ast.AssertTypeJSON) != 0 && p.options.mode == config.ModeBundle && s.Items != nil {
+				for _, item := range *s.Items {
+					if p.options.ts.Parse && p.tsUseCounts[item.Name.Ref.InnerIndex] == 0 && (p.options.unusedImportFlagsTS&config.UnusedImportKeepValues) == 0 {
+						// Do not count imports that TypeScript interprets as type annotations
+						continue
+					}
+					if item.Alias != "default" {
+						p.log.AddErrorWithNotes(&p.tracker, js_lexer.RangeOfIdentifier(p.source, item.AliasLoc),
+							fmt.Sprintf("Cannot use non-default import %q with a standard JSON module", item.Alias),
+							p.notesForAssertTypeJSON(record, item.Alias))
+					}
+				}
+			}
+
 			// TypeScript always trims unused imports. This is important for
 			// correctness since some imports might be fake (only in the type
 			// system and used for type-only imports).
@@ -15089,7 +15145,7 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 					if symbol.UseCountEstimate == 0 && (p.options.ts.Parse || !p.moduleScope.ContainsDirectEval) {
 						// Make sure we don't remove this if it was used for a property
 						// access while bundling
-						if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) == 0 {
+						if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems.entries) == 0 {
 							s.StarNameLoc = nil
 						}
 					}
@@ -15149,10 +15205,10 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 			if p.options.mode != config.ModePassThrough {
 				if s.StarNameLoc != nil {
 					// "importItemsForNamespace" has property accesses off the namespace
-					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) > 0 {
+					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems.entries) > 0 {
 						// Sort keys for determinism
-						sorted := make([]string, 0, len(importItems))
-						for alias := range importItems {
+						sorted := make([]string, 0, len(importItems.entries))
+						for alias := range importItems.entries {
 							sorted = append(sorted, alias)
 						}
 						sort.Strings(sorted)
@@ -15164,7 +15220,7 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 						// by still converting property accesses off the namespace into
 						// bare identifiers even if the namespace is still needed.
 						for _, alias := range sorted {
-							name := importItems[alias]
+							name := importItems.entries[alias]
 							p.namedImports[name.Ref] = js_ast.NamedImport{
 								Alias:             alias,
 								AliasLoc:          name.Loc,
@@ -15308,6 +15364,17 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 					record.Flags |= ast.ContainsDefaultAlias
 				} else if item.OriginalName == "__esModule" {
 					record.Flags |= ast.ContainsESModuleAlias
+				}
+			}
+
+			// Forbid non-default imports for standard JSON modules
+			if (record.Flags&ast.AssertTypeJSON) != 0 && p.options.mode == config.ModeBundle {
+				for _, item := range s.Items {
+					if item.Alias != "default" {
+						p.log.AddErrorWithNotes(&p.tracker, js_lexer.RangeOfIdentifier(p.source, item.AliasLoc),
+							fmt.Sprintf("Cannot use non-default import %q with a standard JSON module", item.Alias),
+							p.notesForAssertTypeJSON(record, item.Alias))
+					}
 				}
 			}
 		}
@@ -15767,7 +15834,7 @@ func newParser(log logger.Log, source logger.Source, lexer js_lexer.Lexer, optio
 		localTypeNames:             make(map[string]bool),
 
 		// These are for handling ES6 imports and exports
-		importItemsForNamespace: make(map[js_ast.Ref]map[string]js_ast.LocRef),
+		importItemsForNamespace: make(map[js_ast.Ref]namespaceImportItems),
 		isImportItem:            make(map[js_ast.Ref]bool),
 		namedImports:            make(map[js_ast.Ref]js_ast.NamedImport),
 		namedExports:            make(map[string]js_ast.NamedExport),
@@ -16366,7 +16433,7 @@ func (p *parser) generateImportStmt(
 	p.moduleScope.Generated = append(p.moduleScope.Generated, namespaceRef)
 	declaredSymbols := make([]js_ast.DeclaredSymbol, 1+len(imports))
 	clauseItems := make([]js_ast.ClauseItem, len(imports))
-	importRecordIndex := p.addImportRecord(ast.ImportStmt, loc, path, nil)
+	importRecordIndex := p.addImportRecord(ast.ImportStmt, loc, path, nil, 0)
 	if sourceIndex != nil {
 		p.importRecords[importRecordIndex].SourceIndex = ast.MakeIndex32(*sourceIndex)
 	}
