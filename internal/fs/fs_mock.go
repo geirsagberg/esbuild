@@ -65,6 +65,21 @@ func MockFS(input map[string]string, kind MockKind) FS {
 }
 
 func (fs *mockFS) ReadDirectory(path string) (DirEntries, error, error) {
+	slashes := "/"
+	if fs.Kind == MockWindows {
+		slashes = "/\\"
+	}
+
+	// Trim trailing slashes before lookup
+	firstSlash := strings.IndexAny(path, slashes)
+	for {
+		i := strings.LastIndexAny(path, slashes)
+		if i != len(path)-1 || i <= firstSlash {
+			break
+		}
+		path = path[:i]
+	}
+
 	if dir, ok := fs.dirs[path]; ok {
 		return dir, nil, nil
 	}
