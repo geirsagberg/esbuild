@@ -118,6 +118,10 @@
 
     The primary branch for this repository was previously called `master` but is now called `main`. This change mirrors a similar change in many other projects.
 
+* Throw an early error if decoded UTF-8 text isn't a `Uint8Array` ([#2532](https://github.com/evanw/esbuild/issues/2532))
+
+    If you run esbuild's JavaScript API in a broken JavaScript environment where `new TextEncoder().encode("") instanceof Uint8Array` is false, then esbuild's API will fail with a confusing serialization error message that makes it seem like esbuild has a bug even though the real problem is that the JavaScript environment itself is broken. This can happen when using the test framework called "Jest". With this release, esbuild's API will now throw earlier when it detects that the environment is unable to encode UTF-8 text correctly with an error message that makes it more clear that this is not a problem with esbuild.
+
 ## Unreleased
 
 * Fix an obscure npm package installation issue with `--omit=optional` ([#2558](https://github.com/evanw/esbuild/issues/2558))
